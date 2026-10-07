@@ -1,113 +1,122 @@
-import React, { useState } from 'react';
-import ForgeReconciler, {
-  Text,
-  Textfield,
-  Button,
-  Stack,
-  Link,
-  Heading,
-} from '@forge/react';
-import { requestConfluence } from '@forge/bridge';
+import React, { useEffect, useState } from 'react';
+import ForgeReconciler, { Textfield, Button, Box, Spinner, Text, Strong, Link } from '@forge/react';
+import { invoke } from '@forge/bridge';
 
 const App = () => {
-  const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
+  // Przechodzimy na kontrolowany stan wartości pola tekstowego
+  const [searchTerm, setSearchTerm] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+  
+  const [isSearching, setIsSearching] = useState(false);
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
+  const [initError, setInitError] = useState(null);
 
-  const handleSearch = async () => {
-    if (!input) {
-      setError('Proszę podać adres URL lub tytuł strony.');
-      return;
-    }
-    
-    setLoading(true);
-    setError(null);
-    
-    try {
-      let searchTerm = input;
-      let pageIdToExclude = null;
-
-      // Wyciągamy ID oraz tytuł (jeśli istnieje) z adresu URL
-      const urlMatch = input.match(/(?:pages\/|pages\/edit-v2\/)(\d+)(?:\/([^\/?#]+))?/);
-
-      if (urlMatch) {
-        pageIdToExclude = urlMatch[1]; 
+  useEffect(() => {
+    const fetchInitialData = async () => {
+      console.log("[FRONTEND] Wywołuję invoke('getInitialData')");
+      try {
+        const data = await invoke('getInitialData');
+        console.log("[FRONTEND] Odpowiedź z getInitialData:", data);
         
-        if (urlMatch[2]) {
-          const decodedTitle = decodeURIComponent(urlMatch[2]);
-          searchTerm = decodedTitle.replace(/\+/g, ' ');
+        if (data.success && data.title) {
+          setSearchTerm(data.title); // Zapisujemy pobraną nazwę w stanie
         } else {
-          throw new Error('Ten link nie zawiera tytułu. Wklej pełny adres z tytułem na końcu lub wpisz sam tytuł ręcznie.');
+          setInitError(data.error);
         }
+      } catch (err) {
+        console.error("[FRONTEND] Błąd invoke:", err);
+        setInitError("Nie udało się połączyć z backendem.");
+      } finally {
+        setIsLoading(false);
       }
+    };
+    fetchInitialData();
+  }, []);
 
-      // Zabezpieczenie wewnętrznych cudzysłowów w tytule
-      const safeTitle = searchTerm.replace(/"/g, '\\"');
-      
-      // POPRAWKA: Pojedyncze cudzysłowy wokół stringa wyszukiwanego
-      const cql = `type = page AND text ~ "${safeTitle}"`;
+  // Nowa funkcja przypięta bezpośrednio do zdarzenia onClick na przycisku
+  const handleSearch = async () => {
+    console.log(`[FRONTEND] Przycisk kliknięty. Szukam: ${searchTerm}`);
+    if (!searchTerm) return;
 
-      // Wyszukiwanie w API (encodeURIComponent poprawnie koduje spacje i znaki specjalne dla URL)
-      const searchRes = await requestConfluence(`/wiki/rest/api/content/search?cql=${encodeURIComponent(cql)}&limit=20`);
-      
-      if (!searchRes.ok) {
-        const errorText = await searchRes.text();
-        throw new Error(`Błąd API (Status: ${searchRes.status}): ${errorText}`);
+    setIsSearching(true);
+    setError(null);
+    setResults(null);
+
+    try {
+      const response = await invoke('getLinkingPages', { documentName: searchTerm });
+      console.log("[FRONTEND] Odpowiedź z getLinkingPages:", response);
+
+      if (response.success) {
+        setResults(response.pages);
+      } else {
+        setError(response.error);
       }
-      
-      const searchData = await searchRes.json();
-      
-      // Odrzucamy stronę źródłową (komponent nie ma raportować, że używa sam siebie)
-      const fetchedPages = (searchData.results || [])
-        .filter((page) => page.id !== pageIdToExclude)
-        .map((page) => ({
-          id: page.id,
-          title: page.title,
-          url: page._links?.webui || '#',
-        }));
-        
-      setResults(fetchedPages);
-    } catch (e) {
-      setError(e.message);
+    } catch (err) {
+      console.error("[FRONTEND] Błąd invoke wyszukiwania:", err);
+      setError('Błąd połączenia z serwerem podczas wyszukiwania.');
     } finally {
-      setLoading(false);
+      setIsSearching(false);
     }
   };
 
+  if (isLoading) {
+    return (
+      <Box padding="space.100">
+        <Spinner size="large" />
+        <Text>Ładowanie danych ze strony...</Text>
+      </Box>
+    );
+  }
+
   return (
-    <Stack space="space.200">
-      <Heading size="medium">🔍 Gdzie użyto tego komponentu?</Heading>
-      
-      <Textfield
-        placeholder="Wklej link (np. .../421167140/Ancona-002...) lub wpisz tytuł..."
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-      />
-      <Button appearance="primary" onClick={handleSearch} isLoading={loading}>
-        Znajdź powiązane dokumenty
-      </Button>
-      
-      {error && <Text>**Błąd:** {error}</Text>}
-      {results && results.length === 0 && (
-        <Text>Ten komponent nie jest obecnie używany na żadnej innej stronie (lub nie zaktualizowano jeszcze indeksu wyszukiwarki).</Text>
+    <Box>
+      {initError && (
+         <Box padding="space.100">
+           <Text><Strong>Błąd startowy:</Strong> {initError}</Text>
+         </Box>
       )}
+
+      <Box padding="space.100">
+        <Text><Strong>Znajdź powiązane dokumenty</Strong></Text>
+        <Textfield
+           value={searchTerm}
+           onChange={(e) => setSearchTerm(e.target.value)}
+           isDisabled={isSearching}
+           placeholder="Nazwa dokumentu..."
+         />
+         <Box paddingBlockStart="space.100">
+           {/* Przycisk używa teraz bezpośrednio onClick zamiast czekać na onSubmit formularza */}
+           <Button onClick={handleSearch} appearance="primary" isLoading={isSearching}>
+             Szukaj
+           </Button>
+         </Box>
+      </Box>
+
+      {error && (
+        <Box padding="space.100">
+          <Text><Strong>Błąd wyszukiwania:</Strong> {error}</Text>
+        </Box>
+      )}
+
       {results && results.length > 0 && (
-        <Stack space="space.100">
-          <Text>**Komponent został użyty na następujących stronach ({results.length}):**</Text>
+        <Box padding="space.100">
+          <Text><Strong>Znaleziono ({results.length}):</Strong></Text>
           {results.map((page) => (
             <Text key={page.id}>
-                <Link href={`/wiki${page.url}`}>{page.title}</Link>
+              • <Link href={page.url}>{page.title}</Link> ({page.space})
             </Text>
           ))}
-        </Stack>
+        </Box>
       )}
-    </Stack>
+
+      {results && results.length === 0 && (
+        <Box padding="space.100">
+          <Text>Brak wyników dla tej nazwy dokumentu.</Text>
+        </Box>
+      )}
+    </Box>
   );
 };
 
-ForgeReconciler.render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+ForgeReconciler.render(<App />);

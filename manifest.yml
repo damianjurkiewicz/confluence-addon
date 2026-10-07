@@ -2,8 +2,13 @@ modules:
   macro:
     - key: confluence-addon-hello-world-macro
       resource: main
+      resolver:
+        function: backend-resolver
       render: native
       title: Powiązane dokumenty
+  function:
+    - key: backend-resolver
+      handler: index.handler
 resources:
   - key: main
     path: src/frontend/index.jsx

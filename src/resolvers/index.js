@@ -3,47 +3,64 @@ import api, { route } from '@forge/api';
 
 const resolver = new Resolver();
 
-resolver.define('getLinkingPages', async (req) => {
-  const { pageUrl } = req.payload;
+resolver.define('getInitialData', async (req) => {
+  console.log("=== [BACKEND] START getInitialData ===");
+  try {
+    const pageId = req.context?.extension?.content?.id;
+    if (!pageId) {
+      return { success: false, error: 'Brak ID strony w kontekście. Zobacz logi backendu.' };
+    }
+    
+    const response = await api.asUser().requestConfluence(route`/wiki/api/v2/pages/${pageId}`);
+    
+    if (!response.ok) {
+      return { success: false, error: `Błąd API: ${response.status}` };
+    }
+    
+    const data = await response.json();
+    return { success: true, pageId: pageId, title: data.title };
+  } catch (err) {
+    console.error("[BACKEND] Wyjątek w getInitialData:", err);
+    return { success: false, error: err.message };
+  }
+});
 
-  if (!pageUrl) {
-    return { success: false, error: 'Proszę podać adres URL strony.' };
+resolver.define('getLinkingPages', async (req) => {
+  console.log("=== [BACKEND] START getLinkingPages ===");
+  const { documentName } = req.payload;
+  const pageId = req.context?.extension?.content?.id;
+
+  if (!documentName) {
+    return { success: false, error: 'Pole wyszukiwania jest puste.' };
   }
 
-  // 1. Wyciągamy ID strony z linku (np. z https://.../pages/365330608/...)
-  const match = pageUrl.match(/pages\/(\d+)/);
-  const pageId = match ? match[1] : null;
-
   try {
-    // 2. Szukamy stron, które zawierają odnośnik/tekst z podanym ID lub pełnym adresem URL
-    // Wykorzystujemy wyszukiwanie CQL po pełnym tekście (text ~ ...)
-    const searchTerm = pageId ? `text ~ "${pageId}"` : `text ~ "${pageUrl}"`;
-    const cql = `type = page AND ${searchTerm}`;
-
+    const cql = `type = page AND text ~ "${documentName}"`;
     const response = await api.asUser().requestConfluence(
       route`/wiki/rest/api/content/search?cql=${cql}&expand=version,space`
     );
 
     if (!response.ok) {
-      return { success: false, error: `Błąd API: ${response.status}` };
+      return { success: false, error: `Błąd API wyszukiwania: ${response.status}` };
     }
 
     const data = await response.json();
 
-    // Filtrujemy wyników tak, aby nie pokazywać samej strony docelowej
     const results = data.results
-      .filter((page) => page.id !== pageId)
+      .filter((page) => String(page.id) !== String(pageId))
       .map((page) => ({
         id: page.id,
         title: page.title,
         url: page._links.webui,
-        space: page.space?.name || 'Nieznana przestrzeń',
+        space: page.space?.name || 'Nieznana przestrzeń'
       }));
 
     return { success: true, pages: results };
   } catch (err) {
+    console.error("[BACKEND] Wyjątek w getLinkingPages:", err);
     return { success: false, error: err.message };
   }
 });
 
-export default resolver.getDefinitions();
+// TUTAJ BYŁ BŁĄD. Teraz eksportujemy obiekt resolvera, by plik nadrzędny mógł go odczytać.
+export default resolver;
