@@ -1,0 +1,20 @@
+modules:
+  macro:
+    - key: confluence-addon-hello-world-macro
+      resource: main
+      render: native
+      title: Powiązane dokumenty
+resources:
+  - key: main
+    path: src/frontend/index.jsx
+app:
+  runtime:
+    name: nodejs24.x
+    memoryMB: 256
+    architecture: arm64
+  id: ari:cloud:ecosystem::app/5817461e-7aee-4061-9ff3-765d0375b87c
+permissions:
+  scopes:
+    - search:confluence
+    - read:confluence-content.summary
+    - read:page:confluence
