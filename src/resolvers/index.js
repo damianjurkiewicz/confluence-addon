@@ -26,7 +26,7 @@ resolver.define('getInitialData', async (req) => {
 });
 
 resolver.define('getLinkingPages', async (req) => {
-  console.log("=== [BACKEND] START getLinkingPages (Tryb Hybrydowy) ===");
+  console.log("=== [BACKEND] START getLinkingPages (Potomkowie Kits) ===");
   const { documentName } = req.payload;
   const pageId = req.context?.extension?.content?.id;
 
@@ -36,42 +36,74 @@ resolver.define('getLinkingPages', async (req) => {
 
   try {
     const searchTerm = documentName.trim();
+    const spaceKey = 'VDAL';
 
-    // 1. KROK API (Grube sito)
-    // Wyciągamy pierwszy sensowny człon słowa (np. z "Ancona-002" wyciągnie "Ancona")
-    const coreWords = searchTerm.split(/[^a-zA-Z0-9\u00C0-\u017F]+/);
-    const broadTerm = coreWords.find(w => w.length > 1) || coreWords[0] || searchTerm;
-
-    // Szukamy szeroko. Dajemy limit 100 i expand=body.storage (aby otrzymać kod źródłowy stron)
-    const cql = `type = page AND text ~ "${broadTerm}*"`;
-    console.log(`[BACKEND] Wykonuję SZEROKIE zapytanie CQL: ${cql}`);
-
-    const response = await api.asUser().requestConfluence(
-      route`/wiki/rest/api/content/search?cql=${cql}&expand=version,space,body.storage&limit=100`
+    // 1. ZNAJDŹ STRONĘ "Kits" PRZEZ CQL SEARCH (BEZ BŁĘDU 410)
+    console.log(`[BACKEND] Szukam strony nadrzędnej "Kits" w przestrzeni "${spaceKey}"...`);
+    const parentCql = `type = page AND space = "${spaceKey}" AND title ~ "Kits"`;
+    
+    const parentSearchResp = await api.asUser().requestConfluence(
+      route`/wiki/rest/api/content/search?cql=${parentCql}&limit=10`
     );
 
-    if (!response.ok) {
-      return { success: false, error: `Błąd API wyszukiwania: ${response.status}` };
+    if (!parentSearchResp.ok) {
+      return { success: false, error: `Błąd API podczas szukania strony nadrzędnej: ${parentSearchResp.status}` };
     }
 
-    const data = await response.json();
-    console.log(`[BACKEND] API zwróciło stron (przed filtrem JS): ${data.size}`);
+    const parentSearchData = await parentSearchResp.json();
+    // Szukamy dokładnie strony z tytułem "Kits"
+    const parentPage = parentSearchData.results?.find(p => p.title.trim().toLowerCase() === 'kits') 
+      || parentSearchData.results?.[0];
 
-    // 2. KROK JAVASCRIPT (Precyzyjny skaner)
-    // Filtrujemy strony szukając dokładnego ciągu znaków (wraz ze znakami specjalnymi)
-    const filteredResults = data.results.filter(page => {
+    if (!parentPage) {
+      return { success: false, error: `Nie znaleziono strony "Kits" w przestrzeni "${spaceKey}".` };
+    }
+
+    const kitsId = parentPage.id;
+    console.log(`[BACKEND] Znaleziono ID węzła Kits: ${kitsId} (Tytuł: ${parentPage.title})`);
+
+    // 2. POBIERZ WSZYSTKICH POTOMKÓW (ancestor = kitsId)
+    let allKitPages = [];
+    let start = 0;
+    const limit = 100;
+    const maxFetch = 500;
+
+    const cql = `type = page AND ancestor = ${kitsId}`;
+    console.log(`[BACKEND] Wykonuję zapytanie CQL potomków: ${cql}`);
+
+    while (start < maxFetch) {
+      const response = await api.asUser().requestConfluence(
+        route`/wiki/rest/api/content/search?cql=${cql}&expand=version,space,body.storage&limit=${limit}&start=${start}`
+      );
+
+      if (!response.ok) {
+        return { success: false, error: `Błąd API wyszukiwania potomków: ${response.status}` };
+      }
+
+      const data = await response.json();
+      allKitPages.push(...data.results);
+
+      if (data.results.length < limit) {
+        break;
+      }
+      start += limit;
+    }
+
+    console.log(`[BACKEND] Pobrano ${allKitPages.length} zestawów spod folderu Kits`);
+
+    // 3. SKANER JAVASCRIPT PO HTML
+    const filteredResults = allKitPages.filter(page => {
       const title = page.title || "";
-      // Zabezpieczenie przed brakiem treści
-      const body = page.body?.storage?.value || ""; 
-      
-      // Dokładne sprawdzenie, czy ciąg wpisany przez użytkownika jest w tytule lub kodzie strony
+      const body = page.body?.storage?.value || "";
+
       return title.includes(searchTerm) || body.includes(searchTerm);
     });
 
-    console.log(`[BACKEND] JS odfiltrował i zostawił dokładnych dopasowań: ${filteredResults.length}`);
+    console.log(`[BACKEND] JS znalazł powiązania w: ${filteredResults.length} zestawach`);
 
+    // 4. MAPOWANIE DANYCH
     const results = filteredResults
-      // .filter((page) => String(page.id) !== String(pageId)) // Zakomentowane na czas testów
+      // .filter((page) => String(page.id) !== String(pageId)) // Odkomentuj, gdy zechcesz ukryć bieżącą stronę
       .map((page) => ({
         id: page.id,
         title: page.title,
@@ -79,13 +111,11 @@ resolver.define('getLinkingPages', async (req) => {
         space: page.space?.name || 'Nieznana przestrzeń'
       }));
 
-    // Zwracamy surowe statystyki dla frontendu, żebyś widział co odsiało API, a co JS
-    const debugStats = { 
-      cqlFound: data.size, 
-      jsKept: filteredResults.length 
+    return { 
+      success: true, 
+      pages: results, 
+      rawData: { kitsDescendantsCount: allKitPages.length, matchedCount: filteredResults.length } 
     };
-
-    return { success: true, pages: results, rawData: debugStats };
   } catch (err) {
     console.error("[BACKEND] Wyjątek w getLinkingPages:", err);
     return { success: false, error: err.message };
