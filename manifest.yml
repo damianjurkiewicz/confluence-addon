@@ -1,11 +1,12 @@
 modules:
   macro:
-    - key: confluence-addon-hello-world-macro
+    - key: used-in-macro
       resource: main
       resolver:
         function: backend-resolver
       render: native
-      title: Powiązane dokumenty
+      title: Used In
+      description: Lists pages where this component or material is referenced
   function:
     - key: backend-resolver
       handler: index.handler

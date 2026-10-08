@@ -3,7 +3,7 @@ import api, { route } from '@forge/api';
 
 const resolver = new Resolver();
 
-// Pomocnicza funkcja: pobiera ID strony nadrzędnej (np. "Kits" lub "Elements")
+// Helper function: retrieves parent page ID (e.g., "Kits" or "Elements")
 async function getParentFolderId(folderTitle, spaceKey = 'VDAL') {
   const parentCql = `type = page AND space = "${spaceKey}" AND title ~ "${folderTitle}"`;
   const response = await api.asUser().requestConfluence(
@@ -23,27 +23,27 @@ resolver.define('getInitialData', async (req) => {
   try {
     const pageId = req.context?.extension?.content?.id;
     if (!pageId) {
-      return { success: false, error: 'Brak ID strony w kontekście.' };
+      return { success: false, error: 'Missing page ID in context.' };
     }
     
     const response = await api.asUser().requestConfluence(route`/wiki/api/v2/pages/${pageId}`);
     if (!response.ok) {
-      return { success: false, error: `Błąd API: ${response.status}` };
+      return { success: false, error: `API error: ${response.status}` };
     }
     
     const data = await response.json();
     const title = data.title || '';
 
-    // Logika detekcji kodu (np. ELE-036, MBE-002) - bierzemy PIERWSZY kod z początku tytułu
+    // Extract reference code (e.g., ELE-036, MBE-002) - takes the first matching code pattern
     const codeMatch = title.match(/\b(ELE-\d+|MBE-\d+|[A-Z]+-\d+)\b/i);
     let detectedTerm = codeMatch ? codeMatch[1].toUpperCase() : title;
     
-    // Ustalanie domyślnego folderu docelowego
+    // Determine target search folder based on prefix
     let defaultTargetFolder = 'Kits';
     if (detectedTerm.startsWith('MBE')) {
-      defaultTargetFolder = 'Elements'; // MBE szukamy w Elements
+      defaultTargetFolder = 'Elements'; // Search MBE codes inside Elements
     } else if (detectedTerm.startsWith('ELE')) {
-      defaultTargetFolder = 'Kits';     // ELE szukamy w Kits
+      defaultTargetFolder = 'Kits';     // Search ELE codes inside Kits
     }
 
     return { 
@@ -54,7 +54,7 @@ resolver.define('getInitialData', async (req) => {
       defaultTargetFolder: defaultTargetFolder
     };
   } catch (err) {
-    console.error("[BACKEND] Wyjątek w getInitialData:", err);
+    console.error("[BACKEND] Exception in getInitialData:", err);
     return { success: false, error: err.message };
   }
 });
@@ -66,22 +66,22 @@ resolver.define('getLinkingPages', async (req) => {
   const spaceKey = 'VDAL';
 
   if (!documentName) {
-    return { success: false, error: 'Pole wyszukiwania jest puste.' };
+    return { success: false, error: 'Search term is empty.' };
   }
 
   const folderToSearch = targetFolder || (documentName.trim().toUpperCase().startsWith('MBE') ? 'Elements' : 'Kits');
 
   try {
     const searchTerm = documentName.trim();
-    console.log(`[BACKEND] Szukany kod: "${searchTerm}", Folder docelowy: "${folderToSearch}"`);
+    console.log(`[BACKEND] Search code: "${searchTerm}", Target folder: "${folderToSearch}"`);
 
-    // 1. Znajdź ID folderu docelowego (Kits lub Elements)
+    // 1. Resolve target parent folder ID
     const folderId = await getParentFolderId(folderToSearch, spaceKey);
     if (!folderId) {
-      return { success: false, error: `Nie odnaleziono folderu nadrzędnego "${folderToSearch}" w przestrzeni ${spaceKey}.` };
+      return { success: false, error: `Parent folder "${folderToSearch}" not found in space "${spaceKey}".` };
     }
 
-    // 2. Pobierz potomków danego folderu
+    // 2. Fetch descendants of the target folder
     let allPages = [];
     let start = 0;
     const limit = 100;
@@ -95,7 +95,7 @@ resolver.define('getLinkingPages', async (req) => {
       );
 
       if (!response.ok) {
-        return { success: false, error: `Błąd API wyszukiwania potomków: ${response.status}` };
+        return { success: false, error: `Error searching descendants: ${response.status}` };
       }
 
       const data = await response.json();
@@ -105,25 +105,32 @@ resolver.define('getLinkingPages', async (req) => {
       start += limit;
     }
 
-    console.log(`[BACKEND] Pobrano ${allPages.length} stron z folderu ${folderToSearch}`);
+    console.log(`[BACKEND] Retrieved ${allPages.length} pages from "${folderToSearch}"`);
 
-    // 3. SKANER JS: TYLKO I WYŁĄCZNIE W TREŚCI (body.storage)
-    // Ignorujemy page.title całkowicie!
+    // 3. JavaScript filter: Search strictly within body.storage (ignoring page titles)
     const filteredResults = allPages
-      .filter((page) => String(page.id) !== String(pageId)) // Wykluczamy stronę bieżącą
+      .filter((page) => String(page.id) !== String(pageId)) // Exclude current page
       .filter((page) => {
         const body = page.body?.storage?.value || "";
-        return body.includes(searchTerm); // <-- SZUKAMY TYLKO W ŚRODKU ARTYKUŁU
+        return body.includes(searchTerm);
       });
 
-    console.log(`[BACKEND] Znaleziono ${filteredResults.length} stron z frazą w środku treści.`);
+    console.log(`[BACKEND] Found ${filteredResults.length} matching pages in body storage.`);
 
-    const results = filteredResults.map((page) => ({
-      id: page.id,
-      title: page.title,
-      url: page._links.webui,
-      space: page.space?.name || 'Nieznana przestrzeń'
-    }));
+    // 4. Map results with normalized Confluence URL format
+    const results = filteredResults.map((page) => {
+      const webui = page._links?.webui || '';
+      const formattedUrl = webui.startsWith('/wiki') 
+        ? webui 
+        : `/wiki${webui}`;
+
+      return {
+        id: page.id,
+        title: page.title,
+        url: formattedUrl,
+        space: page.space?.name || 'Unknown space'
+      };
+    });
 
     return { 
       success: true, 
@@ -131,7 +138,7 @@ resolver.define('getLinkingPages', async (req) => {
       searchedIn: folderToSearch
     };
   } catch (err) {
-    console.error("[BACKEND] Wyjątek w getLinkingPages:", err);
+    console.error("[BACKEND] Exception in getLinkingPages:", err);
     return { success: false, error: err.message };
   }
 });
