@@ -26,7 +26,7 @@ resolver.define('getInitialData', async (req) => {
 });
 
 resolver.define('getLinkingPages', async (req) => {
-  console.log("=== [BACKEND] START getLinkingPages ===");
+  console.log("=== [BACKEND] START getLinkingPages (Tryb Hybrydowy) ===");
   const { documentName } = req.payload;
   const pageId = req.context?.extension?.content?.id;
 
@@ -35,19 +35,19 @@ resolver.define('getLinkingPages', async (req) => {
   }
 
   try {
-    // 1. Rozbijamy szukaną frazę na słowa (separatorem są spacje i myślniki)
-    // Np. "Ancona-002" zamieni się na tablicę: ["Ancona", "002"]
-    const tokens = documentName.split(/[\s-]+/).filter(t => t.trim().length > 0);
-    
-    // 2. Budujemy bezpieczne zapytanie z operatorem AND, omijając cudzysłowy dla całych fraz
-    // Wynik dla "Ancona-002": text ~ "Ancona*" AND text ~ "002*"
-    const textQuery = tokens.map(t => `text ~ "${t}*"`).join(' AND ');
-    const cql = `type = page AND ${textQuery}`;
-    
-    console.log(`[BACKEND] Wykonuję zapytanie CQL: ${cql}`);
+    const searchTerm = documentName.trim();
+
+    // 1. KROK API (Grube sito)
+    // Wyciągamy pierwszy sensowny człon słowa (np. z "Ancona-002" wyciągnie "Ancona")
+    const coreWords = searchTerm.split(/[^a-zA-Z0-9\u00C0-\u017F]+/);
+    const broadTerm = coreWords.find(w => w.length > 1) || coreWords[0] || searchTerm;
+
+    // Szukamy szeroko. Dajemy limit 100 i expand=body.storage (aby otrzymać kod źródłowy stron)
+    const cql = `type = page AND text ~ "${broadTerm}*"`;
+    console.log(`[BACKEND] Wykonuję SZEROKIE zapytanie CQL: ${cql}`);
 
     const response = await api.asUser().requestConfluence(
-      route`/wiki/rest/api/content/search?cql=${cql}&expand=version,space`
+      route`/wiki/rest/api/content/search?cql=${cql}&expand=version,space,body.storage&limit=100`
     );
 
     if (!response.ok) {
@@ -55,11 +55,22 @@ resolver.define('getLinkingPages', async (req) => {
     }
 
     const data = await response.json();
-    
-    // Zrzucamy całą surową odpowiedź z wyszukiwania do logów
-    console.log("[BACKEND] SUROWA ODPOWIEDŹ CQL:", JSON.stringify(data, null, 2));
+    console.log(`[BACKEND] API zwróciło stron (przed filtrem JS): ${data.size}`);
 
-    const results = data.results
+    // 2. KROK JAVASCRIPT (Precyzyjny skaner)
+    // Filtrujemy strony szukając dokładnego ciągu znaków (wraz ze znakami specjalnymi)
+    const filteredResults = data.results.filter(page => {
+      const title = page.title || "";
+      // Zabezpieczenie przed brakiem treści
+      const body = page.body?.storage?.value || ""; 
+      
+      // Dokładne sprawdzenie, czy ciąg wpisany przez użytkownika jest w tytule lub kodzie strony
+      return title.includes(searchTerm) || body.includes(searchTerm);
+    });
+
+    console.log(`[BACKEND] JS odfiltrował i zostawił dokładnych dopasowań: ${filteredResults.length}`);
+
+    const results = filteredResults
       // .filter((page) => String(page.id) !== String(pageId)) // Zakomentowane na czas testów
       .map((page) => ({
         id: page.id,
@@ -68,20 +79,24 @@ resolver.define('getLinkingPages', async (req) => {
         space: page.space?.name || 'Nieznana przestrzeń'
       }));
 
-    return { success: true, pages: results, rawData: data };
+    // Zwracamy surowe statystyki dla frontendu, żebyś widział co odsiało API, a co JS
+    const debugStats = { 
+      cqlFound: data.size, 
+      jsKept: filteredResults.length 
+    };
+
+    return { success: true, pages: results, rawData: debugStats };
   } catch (err) {
     console.error("[BACKEND] Wyjątek w getLinkingPages:", err);
     return { success: false, error: err.message };
   }
 });
 
-// NOWY RESOLVER - Pobiera konkretną stronę do analizy
 resolver.define('debugSpecificPage', async (req) => {
   console.log("=== [BACKEND] START debugSpecificPage ===");
   const { pageId } = req.payload; 
 
   try {
-    // Pobieramy stronę wraz z jej zawartością (body.storage) żeby zobaczyć co znajduje się w jej kodzie
     const response = await api.asUser().requestConfluence(
       route`/wiki/api/v2/pages/${pageId}?body-format=storage`
     );
