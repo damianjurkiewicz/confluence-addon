@@ -3,22 +3,56 @@ import api, { route } from '@forge/api';
 
 const resolver = new Resolver();
 
+// Pomocnicza funkcja: pobiera ID strony nadrzędnej (np. "Kits" lub "Elements")
+async function getParentFolderId(folderTitle, spaceKey = 'VDAL') {
+  const parentCql = `type = page AND space = "${spaceKey}" AND title ~ "${folderTitle}"`;
+  const response = await api.asUser().requestConfluence(
+    route`/wiki/rest/api/content/search?cql=${parentCql}&limit=10`
+  );
+
+  if (!response.ok) return null;
+  const data = await response.json();
+  const found = data.results?.find(p => p.title.trim().toLowerCase() === folderTitle.toLowerCase()) 
+    || data.results?.[0];
+  
+  return found ? found.id : null;
+}
+
 resolver.define('getInitialData', async (req) => {
   console.log("=== [BACKEND] START getInitialData ===");
   try {
     const pageId = req.context?.extension?.content?.id;
     if (!pageId) {
-      return { success: false, error: 'Brak ID strony w kontekście. Zobacz logi backendu.' };
+      return { success: false, error: 'Brak ID strony w kontekście.' };
     }
     
     const response = await api.asUser().requestConfluence(route`/wiki/api/v2/pages/${pageId}`);
-    
     if (!response.ok) {
       return { success: false, error: `Błąd API: ${response.status}` };
     }
     
     const data = await response.json();
-    return { success: true, pageId: pageId, title: data.title };
+    const title = data.title || '';
+
+    // Logika detekcji kodu (np. ELE-036, MBE-002) - bierzemy PIERWSZY kod z początku tytułu
+    const codeMatch = title.match(/\b(ELE-\d+|MBE-\d+|[A-Z]+-\d+)\b/i);
+    let detectedTerm = codeMatch ? codeMatch[1].toUpperCase() : title;
+    
+    // Ustalanie domyślnego folderu docelowego
+    let defaultTargetFolder = 'Kits';
+    if (detectedTerm.startsWith('MBE')) {
+      defaultTargetFolder = 'Elements'; // MBE szukamy w Elements
+    } else if (detectedTerm.startsWith('ELE')) {
+      defaultTargetFolder = 'Kits';     // ELE szukamy w Kits
+    }
+
+    return { 
+      success: true, 
+      pageId: pageId, 
+      title: title,
+      detectedTerm: detectedTerm,
+      defaultTargetFolder: defaultTargetFolder
+    };
   } catch (err) {
     console.error("[BACKEND] Wyjątek w getInitialData:", err);
     return { success: false, error: err.message };
@@ -26,50 +60,34 @@ resolver.define('getInitialData', async (req) => {
 });
 
 resolver.define('getLinkingPages', async (req) => {
-  console.log("=== [BACKEND] START getLinkingPages (Potomkowie Kits) ===");
-  const { documentName } = req.payload;
+  console.log("=== [BACKEND] START getLinkingPages ===");
+  const { documentName, targetFolder } = req.payload;
   const pageId = req.context?.extension?.content?.id;
+  const spaceKey = 'VDAL';
 
   if (!documentName) {
     return { success: false, error: 'Pole wyszukiwania jest puste.' };
   }
 
+  const folderToSearch = targetFolder || (documentName.trim().toUpperCase().startsWith('MBE') ? 'Elements' : 'Kits');
+
   try {
     const searchTerm = documentName.trim();
-    const spaceKey = 'VDAL';
+    console.log(`[BACKEND] Szukany kod: "${searchTerm}", Folder docelowy: "${folderToSearch}"`);
 
-    // 1. ZNAJDŹ STRONĘ "Kits" PRZEZ CQL SEARCH (BEZ BŁĘDU 410)
-    console.log(`[BACKEND] Szukam strony nadrzędnej "Kits" w przestrzeni "${spaceKey}"...`);
-    const parentCql = `type = page AND space = "${spaceKey}" AND title ~ "Kits"`;
-    
-    const parentSearchResp = await api.asUser().requestConfluence(
-      route`/wiki/rest/api/content/search?cql=${parentCql}&limit=10`
-    );
-
-    if (!parentSearchResp.ok) {
-      return { success: false, error: `Błąd API podczas szukania strony nadrzędnej: ${parentSearchResp.status}` };
+    // 1. Znajdź ID folderu docelowego (Kits lub Elements)
+    const folderId = await getParentFolderId(folderToSearch, spaceKey);
+    if (!folderId) {
+      return { success: false, error: `Nie odnaleziono folderu nadrzędnego "${folderToSearch}" w przestrzeni ${spaceKey}.` };
     }
 
-    const parentSearchData = await parentSearchResp.json();
-    // Szukamy dokładnie strony z tytułem "Kits"
-    const parentPage = parentSearchData.results?.find(p => p.title.trim().toLowerCase() === 'kits') 
-      || parentSearchData.results?.[0];
-
-    if (!parentPage) {
-      return { success: false, error: `Nie znaleziono strony "Kits" w przestrzeni "${spaceKey}".` };
-    }
-
-    const kitsId = parentPage.id;
-    console.log(`[BACKEND] Znaleziono ID węzła Kits: ${kitsId} (Tytuł: ${parentPage.title})`);
-
-    // 2. POBIERZ WSZYSTKICH POTOMKÓW (ancestor = kitsId)
-    let allKitPages = [];
+    // 2. Pobierz potomków danego folderu
+    let allPages = [];
     let start = 0;
     const limit = 100;
     const maxFetch = 500;
 
-    const cql = `type = page AND ancestor = ${kitsId}`;
-    console.log(`[BACKEND] Wykonuję zapytanie CQL potomków: ${cql}`);
+    const cql = `type = page AND ancestor = ${folderId}`;
 
     while (start < maxFetch) {
       const response = await api.asUser().requestConfluence(
@@ -81,66 +99,39 @@ resolver.define('getLinkingPages', async (req) => {
       }
 
       const data = await response.json();
-      allKitPages.push(...data.results);
+      allPages.push(...data.results);
 
-      if (data.results.length < limit) {
-        break;
-      }
+      if (data.results.length < limit) break;
       start += limit;
     }
 
-    console.log(`[BACKEND] Pobrano ${allKitPages.length} zestawów spod folderu Kits`);
+    console.log(`[BACKEND] Pobrano ${allPages.length} stron z folderu ${folderToSearch}`);
 
-    // 3. SKANER JAVASCRIPT PO HTML
-    const filteredResults = allKitPages.filter(page => {
-      const title = page.title || "";
-      const body = page.body?.storage?.value || "";
+    // 3. SKANER JS: TYLKO I WYŁĄCZNIE W TREŚCI (body.storage)
+    // Ignorujemy page.title całkowicie!
+    const filteredResults = allPages
+      .filter((page) => String(page.id) !== String(pageId)) // Wykluczamy stronę bieżącą
+      .filter((page) => {
+        const body = page.body?.storage?.value || "";
+        return body.includes(searchTerm); // <-- SZUKAMY TYLKO W ŚRODKU ARTYKUŁU
+      });
 
-      return title.includes(searchTerm) || body.includes(searchTerm);
-    });
+    console.log(`[BACKEND] Znaleziono ${filteredResults.length} stron z frazą w środku treści.`);
 
-    console.log(`[BACKEND] JS znalazł powiązania w: ${filteredResults.length} zestawach`);
-
-    // 4. MAPOWANIE DANYCH
-    const results = filteredResults
-      // .filter((page) => String(page.id) !== String(pageId)) // Odkomentuj, gdy zechcesz ukryć bieżącą stronę
-      .map((page) => ({
-        id: page.id,
-        title: page.title,
-        url: page._links.webui,
-        space: page.space?.name || 'Nieznana przestrzeń'
-      }));
+    const results = filteredResults.map((page) => ({
+      id: page.id,
+      title: page.title,
+      url: page._links.webui,
+      space: page.space?.name || 'Nieznana przestrzeń'
+    }));
 
     return { 
       success: true, 
       pages: results, 
-      rawData: { kitsDescendantsCount: allKitPages.length, matchedCount: filteredResults.length } 
+      searchedIn: folderToSearch
     };
   } catch (err) {
     console.error("[BACKEND] Wyjątek w getLinkingPages:", err);
-    return { success: false, error: err.message };
-  }
-});
-
-resolver.define('debugSpecificPage', async (req) => {
-  console.log("=== [BACKEND] START debugSpecificPage ===");
-  const { pageId } = req.payload; 
-
-  try {
-    const response = await api.asUser().requestConfluence(
-      route`/wiki/api/v2/pages/${pageId}?body-format=storage`
-    );
-
-    if (!response.ok) {
-      return { success: false, error: `Błąd pobierania strony ${pageId}: ${response.status}` };
-    }
-
-    const data = await response.json();
-    console.log(`[BACKEND] SUROWE DANE DLA STRONY ${pageId}:`, JSON.stringify(data, null, 2));
-
-    return { success: true, data: data };
-  } catch (err) {
-    console.error("[BACKEND] Wyjątek w debugSpecificPage:", err);
     return { success: false, error: err.message };
   }
 });
